@@ -29,7 +29,7 @@ try:
         GSHEET_ENABLED = True
 except Exception as e:
     # Google Sheets未設定の場合はCSVフォールバック
-    pass
+    _gsheet_error = str(e)
 
 
 def load_from_gsheet():
@@ -93,7 +93,9 @@ st.title("🌺 Okinawa Spectrum Logger (All-in-One Analysis)")
 if GSHEET_ENABLED:
     st.caption("☁️ Google Sheets に接続中 — データはリアルタイムで共有されます")
 else:
-    st.caption("💾 ローカルCSVモード — Google Sheets未設定")
+    error_msg = _gsheet_error if '_gsheet_error' in dir() else "gcp_service_account not found in secrets"
+    st.caption(f"💾 ローカルCSVモード — Google Sheets未設定")
+    st.warning(f"⚠️ Google Sheets接続エラー: {error_msg}")
 
 # 座標データの定義
 LAT_LON = {
