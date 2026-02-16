@@ -7,10 +7,93 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
+# --- Google Sheets 連携 ---
+GSHEET_ENABLED = False
+gsheet_worksheet = None
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    if "gcp_service_account" in st.secrets:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scopes
+        )
+        client = gspread.authorize(creds)
+        spreadsheet = client.open(st.secrets["spreadsheet"]["name"])
+        gsheet_worksheet = spreadsheet.sheet1
+        GSHEET_ENABLED = True
+except Exception as e:
+    # Google Sheets未設定の場合はCSVフォールバック
+    pass
+
+
+def load_from_gsheet():
+    """Google Sheetsから全データを読み込む"""
+    try:
+        records = gsheet_worksheet.get_all_records()
+        if records:
+            df = pd.DataFrame(records)
+            df = df.fillna("")
+            return df.to_dict("records")
+        return []
+    except Exception:
+        return []
+
+
+def save_to_gsheet(log_entry):
+    """Google Sheetsに1行追加する"""
+    try:
+        # ヘッダーが無ければ追加
+        existing = gsheet_worksheet.get_all_values()
+        headers = [
+            "Location", "Hard_Y_Authenticity", "Hard_X_Affect",
+            "Soft_Y_Correctness", "Soft_X_Affect",
+            "Comment", "Image_Path", "Timestamp"
+        ]
+        if not existing:
+            gsheet_worksheet.append_row(headers)
+
+        row = [
+            log_entry.get("Location", ""),
+            log_entry.get("Hard_Y_Authenticity", 0),
+            log_entry.get("Hard_X_Affect", 0),
+            log_entry.get("Soft_Y_Correctness", 0),
+            log_entry.get("Soft_X_Affect", 0),
+            log_entry.get("Comment", ""),
+            log_entry.get("Image_Path", ""),
+            log_entry.get("Timestamp", ""),
+        ]
+        gsheet_worksheet.append_row(row)
+        return True
+    except Exception:
+        return False
+
+
+def delete_from_gsheet(row_index):
+    """Google Sheetsから行を削除する (row_index: 0-based, ヘッダー除く)"""
+    try:
+        # gspreadは1-based, ヘッダーが1行目なので +2
+        gsheet_worksheet.delete_rows(row_index + 2)
+        return True
+    except Exception:
+        return False
+
+
 # ページ設定
 st.set_page_config(page_title="Okinawa Spectrum Logger", layout="wide")
 
 st.title("🌺 Okinawa Spectrum Logger (All-in-One Analysis)")
+
+# データソース表示
+if GSHEET_ENABLED:
+    st.caption("☁️ Google Sheets に接続中 — データはリアルタイムで共有されます")
+else:
+    st.caption("💾 ローカルCSVモード — Google Sheets未設定")
 
 # 座標データの定義
 LAT_LON = {
@@ -25,7 +108,9 @@ LAT_LON = {
 
 # セッション状態の初期化
 if 'logs' not in st.session_state:
-    if os.path.exists("okinawa_survey_data.csv"):
+    if GSHEET_ENABLED:
+        st.session_state.logs = load_from_gsheet()
+    elif os.path.exists("okinawa_survey_data.csv"):
         try:
             df_load = pd.read_csv("okinawa_survey_data.csv")
             df_load = df_load.fillna("") 
@@ -34,6 +119,10 @@ if 'logs' not in st.session_state:
             st.session_state.logs = []
     else:
         st.session_state.logs = []
+
+# Google Sheets接続時は毎回最新データを取得
+if GSHEET_ENABLED:
+    st.session_state.logs = load_from_gsheet()
 
 # --- サイドバー（入力画面） ---
 with st.sidebar:
@@ -85,6 +174,11 @@ with st.sidebar:
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         st.session_state.logs.append(new_log)
+
+        if GSHEET_ENABLED:
+            save_to_gsheet(new_log)
+        
+        # CSVにも保存（バックアップ）
         pd.DataFrame(st.session_state.logs).to_csv("okinawa_survey_data.csv", index=False, encoding="utf-8-sig")
         st.success("記録完了！")
         st.rerun()
@@ -113,6 +207,11 @@ if st.session_state.logs:
     # === 右側：グラフ群 ===
     with col_graphs_side:
         df = pd.DataFrame(st.session_state.logs)
+        
+        # 数値型に変換（Google Sheetsから文字列で来る場合の対策）
+        for col in ["Hard_Y_Authenticity", "Hard_X_Affect", "Soft_Y_Correctness", "Soft_X_Affect"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         
         # --- 上段：個別分析グラフ（左右分割） ---
         col_hard_g, col_soft_g = st.columns(2)
@@ -161,23 +260,28 @@ if st.session_state.logs:
         )
 
         for i, log in enumerate(st.session_state.logs):
+            h_x = float(log.get('Hard_X_Affect', 0) or 0)
+            h_y = float(log.get('Hard_Y_Authenticity', 0) or 0)
+            s_x = float(log.get('Soft_X_Affect', 0) or 0)
+            s_y = float(log.get('Soft_Y_Correctness', 0) or 0)
+            
             # 矢印
             fig_v.add_annotation(
-                x=log['Soft_X_Affect'], y=log['Soft_Y_Correctness'],
-                ax=log['Hard_X_Affect'], ay=log['Hard_Y_Authenticity'],
+                x=s_x, y=s_y,
+                ax=h_x, ay=h_y,
                 xref="x", yref="y", axref="x", ayref="y",
                 showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2, arrowcolor="rgba(100,100,100,0.6)"
             )
             # ハード点（赤）
             fig_v.add_trace(go.Scatter(
-                x=[log['Hard_X_Affect']], y=[log['Hard_Y_Authenticity']],
+                x=[h_x], y=[h_y],
                 mode='markers', marker=dict(color='firebrick', size=10, line=dict(width=1, color='DarkSlateGrey')),
                 name='Hard (物質)' if i == 0 else None, showlegend=(i == 0),
                 hovertext=f"{log['Location']} (Hard)"
             ))
             # ソフト点（青）
             fig_v.add_trace(go.Scatter(
-                x=[log['Soft_X_Affect']], y=[log['Soft_Y_Correctness']],
+                x=[s_x], y=[s_y],
                 mode='markers+text', marker=dict(color='royalblue', size=12, line=dict(width=1, color='DarkSlateGrey')),
                 text=[log['Location']], textposition="top center",
                 name='Soft (体験)' if i == 0 else None, showlegend=(i == 0),
@@ -200,6 +304,10 @@ if st.session_state.logs:
                 if st.button(f"🗑️ 削除", key=f"del_{i}"):
                     if img_path and isinstance(img_path, str) and os.path.exists(img_path):
                         os.remove(img_path)
+                    
+                    if GSHEET_ENABLED:
+                        delete_from_gsheet(i)
+                    
                     st.session_state.logs.pop(i)
                     pd.DataFrame(st.session_state.logs).to_csv("okinawa_survey_data.csv", index=False, encoding="utf-8-sig")
                     st.rerun()

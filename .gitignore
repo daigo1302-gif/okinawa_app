@@ -22,6 +22,9 @@ env/
 Thumbs.db
 .DS_Store
 
+# Streamlit secrets (credentials)
+.streamlit/secrets.toml
+
 # App data (user-specific)
 okinawa_survey_data.csv
 photos/*
